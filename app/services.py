@@ -7,7 +7,15 @@ def calculate(entry: Entry, kpi: KPI):
         return
     entry.performance_pct = entry.actual / kpi.target * 100
     ratio = entry.actual / kpi.target
-    entry.score = 5 if ratio >= 1.2 else 4 if ratio >= 1.0 else 3 if ratio >= .8 else 2 if ratio >= .6 else 1
+    #entry.score = 5 if ratio >= 1.2 else 4 if ratio >= 1.0 else 3 if ratio >= .8 else 2 if ratio >= .6 else 1
+    entry.score = (
+    1 if entry.performance_pct <= 25 else
+    2 if 25 < entry.performance_pct <= 50 else
+    3 if 50 < entry.performance_pct <= 75 else
+    4 if 75 < entry.performance_pct < 90 else
+    5 if entry.performance_pct >= 90 else
+    None
+    )
     entry.final_score = entry.score * kpi.perspective_weight * kpi.kpi_weight
 
 def generate_month(db: Session, month):

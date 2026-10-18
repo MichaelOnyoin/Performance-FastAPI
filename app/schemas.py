@@ -26,7 +26,7 @@ class EntryUpdate(BaseModel):
     employee_comments: str|None = None
 
 class ReviewUpdate(BaseModel):
-    status: str = Field(pattern="^(Reviewed|Approved|Rejected)$")
+    status: str = Field(pattern="^(Approved|Rejected)$")
     supervisor_comments: str|None = None
 
 class GenerateRequest(BaseModel):
@@ -63,6 +63,8 @@ class EntryOut(BaseModel):
     score: float|None
     final_score: float|None
     status: str
+    employee_comments: str|None = None
+    supervisor_comments: str|None = None
     has_context: bool = False
     context_filename: str|None = None
     model_config = ConfigDict(from_attributes=True)

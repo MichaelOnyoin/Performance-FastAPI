@@ -16,7 +16,7 @@ from .services import calculate, generate_month
 router = APIRouter(prefix="/api")
 CONTEXT_MAGIC = b"HLBCTX1\n"
 MAX_CONTEXT_SIZE = 10 * 1024 * 1024
-ALLOWED_CONTEXT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
+ALLOWED_CONTEXT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
 
 def _pack_context(filename: str, content_type: str, content: bytes) -> bytes:
     metadata = json.dumps({"filename": filename, "content_type": content_type}, ensure_ascii=False).encode("utf-8")
@@ -148,6 +148,8 @@ def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depend
              "kpi_id": entry.kpi_id, "kpi_name": kpi_name, "month": entry.month,
              "actual": entry.actual, "performance_pct": entry.performance_pct, "score": entry.score,
              "final_score": entry.final_score, "status": entry.status,
+             "employee_comments": entry.employee_comments,
+             "supervisor_comments": entry.supervisor_comments,
              "has_context": entry.context is not None,
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
             for entry, employee_name, kpi_name in q.all()]
@@ -163,7 +165,7 @@ def upload_entry_context(entry_id: int, file: UploadFile=File(...), db: Session=
     filename = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
     extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if not filename or extension not in ALLOWED_CONTEXT_EXTENSIONS:
-        raise HTTPException(415, "Attach a PDF, DOCX, XLSX, TXT, CSV, PNG, or JPG document")
+        raise HTTPException(415, "Attach a PDF, Word, Excel, PowerPoint, TXT, CSV, PNG, or JPG document")
     content = file.file.read(MAX_CONTEXT_SIZE + 1)
     if not content:
         raise HTTPException(400, "The selected document is empty")
@@ -199,30 +201,54 @@ def delete_entry_context(entry_id: int, db: Session=Depends(get_db), user: User=
     entry.context = None
     db.commit()
 
-@router.patch("/entries/{entry_id}", response_model=EntryOut)
+@router.patch("/entries/{entry_id}", response_model=EntryOut, response_model_exclude_unset=True)
 def update_entry(entry_id:int, data:EntryUpdate, db:Session=Depends(get_db), user:User=Depends(current_user)):
+    if user.role != "Employee":
+        raise HTTPException(403, "Only employees can edit their KPI actuals")
     obj=db.get(Entry, entry_id)
     if not obj or obj.status not in ("Draft","Rejected"): raise HTTPException(400,"Entry unavailable for editing")
-    if user.role == "Employee":
-        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
-        if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
+    employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
     for k,v in data.model_dump(exclude_unset=True).items(): setattr(obj,k,v)
     calculate(obj, db.get(KPI,obj.kpi_id)); db.commit(); db.refresh(obj); return obj
 
-@router.post("/entries/{entry_id}/submit", response_model=EntryOut)
+@router.patch("/entries/{entry_id}/review-edit", response_model=EntryOut, response_model_exclude_unset=True)
+def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    entry = db.get(Entry, entry_id)
+    if not entry:
+        raise HTTPException(404, "Entry not found")
+    if entry.status != "Submitted":
+        raise HTTPException(400, "Only entries awaiting review can be edited by a reviewer")
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(400, "No entry changes provided")
+    for field, value in changes.items():
+        setattr(entry, field, value)
+    calculate(entry, db.get(KPI, entry.kpi_id))
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+@router.post("/entries/{entry_id}/submit", response_model=EntryOut, response_model_exclude_unset=True)
 def submit(entry_id:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
+    if user.role != "Employee":
+        raise HTTPException(403, "Only employees can submit their KPI actuals")
     obj=db.get(Entry,entry_id)
     if not obj or obj.actual is None: raise HTTPException(400,"Actual is required")
-    if user.role == "Employee":
-        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
-        if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
+    employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
     if obj.status not in ("Draft", "Rejected"): raise HTTPException(400, "Entry unavailable for submission")
     obj.status="Submitted"; db.commit(); db.refresh(obj); return obj
 
-@router.patch("/entries/{entry_id}/review", response_model=EntryOut)
-def review(entry_id:int, data:ReviewUpdate, db:Session=Depends(get_db), _=Depends(require_roles("Manager","Partner","Admin"))):
+@router.patch("/entries/{entry_id}/review", response_model=EntryOut, response_model_exclude_unset=True)
+def review(entry_id:int, data:ReviewUpdate, db:Session=Depends(get_db), _=Depends(require_roles("Admin"))):
     obj=db.get(Entry,entry_id)
     if not obj: raise HTTPException(404,"Entry not found")
+    if obj.status != "Submitted": raise HTTPException(400, "Only entries submitted for review can be reviewed")
+    if data.status == "Rejected" and not (data.supervisor_comments or "").strip():
+        raise HTTPException(422, "Add reviewer feedback before rejecting an entry")
+    if data.status == "Approved" and obj.actual is None:
+        raise HTTPException(400, "An actual value is required before approval")
     obj.status=data.status; obj.supervisor_comments=data.supervisor_comments; db.commit(); db.refresh(obj); return obj
 
 @router.post("/admin/generate-month")
