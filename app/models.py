@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from sqlalchemy import String, Float, ForeignKey, Date, DateTime, Text, UniqueConstraint
+from sqlalchemy import String, Float, ForeignKey, Date, DateTime, Text, LargeBinary, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -32,6 +32,7 @@ class KPI(Base):
     kpi_weight: Mapped[float] = mapped_column(Float)
     target: Mapped[float] = mapped_column(Float)
     unit_notes: Mapped[str|None] = mapped_column(String(255), nullable=True)
+    #context: Mapped[str|None] = mapped_column(blob, nullable=True)
 
 class Entry(Base):
     __tablename__ = "entries"
@@ -46,6 +47,7 @@ class Entry(Base):
     final_score: Mapped[float|None] = mapped_column(Float, nullable=True)
     employee_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
     supervisor_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
+    context: Mapped[bytes|None] = mapped_column(LargeBinary, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="Draft", index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     employee: Mapped[Employee] = relationship(back_populates="entries")
