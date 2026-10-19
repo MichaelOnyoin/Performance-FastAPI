@@ -1,12 +1,12 @@
 from sqlalchemy.orm import Session
-from .models import Entry, Employee, KPI
+from .models import Entry, KPI, EmployeeKPI
 
 def calculate(entry: Entry, kpi: KPI):
-    if entry.actual is None or not kpi.target:
+    target = entry.target_snapshot if entry.target_snapshot is not None else kpi.target
+    if entry.actual is None or target is None or target == 0:
         entry.performance_pct = entry.score = entry.final_score = None
         return
-    entry.performance_pct = entry.actual / kpi.target * 100
-    ratio = entry.actual / kpi.target
+    entry.performance_pct = entry.actual / target * 100
     #entry.score = 5 if ratio >= 1.2 else 4 if ratio >= 1.0 else 3 if ratio >= .8 else 2 if ratio >= .6 else 1
     entry.score = (
     1 if entry.performance_pct <= 25 else
@@ -20,10 +20,15 @@ def calculate(entry: Entry, kpi: KPI):
 
 def generate_month(db: Session, month):
     created = 0
-    for emp in db.query(Employee).all():
-        for kpi in db.query(KPI).all():
-            exists = db.query(Entry).filter_by(employee_id=emp.id, kpi_id=kpi.id, month=month).first()
-            if not exists:
-                db.add(Entry(employee_id=emp.id, kpi_id=kpi.id, month=month, status="Draft")); created += 1
+    assignments = db.query(EmployeeKPI).filter(EmployeeKPI.is_active.is_(True)).all()
+    for assignment in assignments:
+        exists = db.query(Entry).filter_by(employee_id=assignment.employee_id, kpi_id=assignment.kpi_id, month=month).first()
+        if not exists:
+            db.add(Entry(employee_id=assignment.employee_id, kpi_id=assignment.kpi_id, month=month,
+                         target_snapshot=assignment.target, status="Draft"))
+            created += 1
+        elif exists.target_snapshot is None and exists.status in ("Draft", "Rejected"):
+            exists.target_snapshot = assignment.target
+            calculate(exists, db.get(KPI, assignment.kpi_id))
     db.commit()
     return created

@@ -1,8 +1,9 @@
-from .database import Base, engine, SessionLocal
+from .database import Base, engine, SessionLocal, ensure_schema
 from .models import User
 from .auth import hash_password
 
 Base.metadata.create_all(bind=engine)
+ensure_schema()
 db=SessionLocal()
 try:
     if not db.query(User).filter_by(email="admin@hlb.local").first():

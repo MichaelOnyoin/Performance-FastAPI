@@ -34,6 +34,13 @@ class KPI(Base):
     unit_notes: Mapped[str|None] = mapped_column(String(255), nullable=True)
     #context: Mapped[str|None] = mapped_column(blob, nullable=True)
 
+class EmployeeKPI(Base):
+    __tablename__ = "employee_kpis"
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), primary_key=True)
+    kpi_id: Mapped[int] = mapped_column(ForeignKey("kpis.id"), primary_key=True)
+    target: Mapped[float] = mapped_column(Float)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+
 class Entry(Base):
     __tablename__ = "entries"
     __table_args__ = (UniqueConstraint("employee_id", "month", "kpi_id", name="uq_employee_month_kpi"),)
@@ -45,6 +52,7 @@ class Entry(Base):
     performance_pct: Mapped[float|None] = mapped_column(Float, nullable=True)
     score: Mapped[float|None] = mapped_column(Float, nullable=True)
     final_score: Mapped[float|None] = mapped_column(Float, nullable=True)
+    target_snapshot: Mapped[float|None] = mapped_column(Float, nullable=True)
     employee_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
     supervisor_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
     context: Mapped[bytes|None] = mapped_column(LargeBinary, nullable=True)

@@ -51,6 +51,13 @@ class KPIOut(BaseModel):
     unit_notes: str|None
     model_config = ConfigDict(from_attributes=True)
 
+class EmployeeKPIAssignment(BaseModel):
+    kpi_id: int
+    target: float
+
+class EmployeeKPIAssignmentUpdate(BaseModel):
+    assignments: list[EmployeeKPIAssignment]
+
 class EntryOut(BaseModel):
     id: int
     employee_id: int
@@ -59,6 +66,7 @@ class EntryOut(BaseModel):
     kpi_name: str|None = None
     month: date
     actual: float|None
+    target: float|None = None
     performance_pct: float|None
     score: float|None
     final_score: float|None

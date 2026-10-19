@@ -8,8 +8,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from .database import get_db
-from .models import User, Employee, KPI, Entry
-from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPIOut
+from .models import User, Employee, KPI, Entry, EmployeeKPI
+from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPIOut, EmployeeKPIAssignmentUpdate
 from .auth import verify_password, hash_password, create_token, current_user, require_roles
 from .services import calculate, generate_month
 
@@ -87,6 +87,54 @@ def employees(db: Session=Depends(get_db),
 def list_kpis(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
     return db.query(KPI).order_by(KPI.code).all()
 
+def _employee_kpi_assignments(db: Session, employee_id: int):
+    rows = (db.query(EmployeeKPI, KPI).join(KPI, EmployeeKPI.kpi_id == KPI.id)
+            .filter(EmployeeKPI.employee_id == employee_id, EmployeeKPI.is_active.is_(True))
+            .order_by(KPI.code).all())
+    return [{"employee_id": assignment.employee_id, "kpi_id": kpi.id, "code": kpi.code,
+             "name": kpi.name, "perspective": kpi.perspective,
+             "perspective_weight": kpi.perspective_weight, "kpi_weight": kpi.kpi_weight,
+             "target": assignment.target} for assignment, kpi in rows]
+
+@router.get("/admin/employees/{employee_id}/kpis")
+def get_employee_kpis(employee_id: int, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    if not db.get(Employee, employee_id):
+        raise HTTPException(404, "Employee not found")
+    return _employee_kpi_assignments(db, employee_id)
+
+@router.put("/admin/employees/{employee_id}/kpis")
+def set_employee_kpis(employee_id: int, data: EmployeeKPIAssignmentUpdate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    if not db.get(Employee, employee_id):
+        raise HTTPException(404, "Employee not found")
+    ids = [assignment.kpi_id for assignment in data.assignments]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "Each KPI can only be assigned once")
+    kpis = {kpi.id: kpi for kpi in db.query(KPI).filter(KPI.id.in_(ids)).all()} if ids else {}
+    if len(kpis) != len(ids):
+        raise HTTPException(422, "One or more KPI IDs do not exist")
+    for assignment in db.query(EmployeeKPI).filter(EmployeeKPI.employee_id == employee_id).all():
+        assignment.is_active = False
+    for item in data.assignments:
+        if item.target < 0:
+            raise HTTPException(422, "Targets cannot be negative")
+        assignment = db.get(EmployeeKPI, (employee_id, item.kpi_id))
+        if assignment is None:
+            assignment = EmployeeKPI(employee_id=employee_id, kpi_id=item.kpi_id, target=item.target, is_active=True)
+            db.add(assignment)
+        else:
+            changed = assignment.target != item.target
+            assignment.target = item.target
+            assignment.is_active = True
+            if changed:
+                for entry in db.query(Entry).filter(
+                    Entry.employee_id == employee_id, Entry.kpi_id == item.kpi_id,
+                    Entry.status.in_(("Draft", "Rejected"))
+                ).all():
+                    entry.target_snapshot = item.target
+                    calculate(entry, kpis[item.kpi_id])
+    db.commit()
+    return _employee_kpi_assignments(db, employee_id)
+
 @router.patch("/kpis/{kpi_id}", response_model=KPIOut)
 def update_kpi(kpi_id: int, data: KPIUpdate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
     kpi = db.get(KPI, kpi_id)
@@ -122,7 +170,7 @@ def my_entries(month: date|None=None, user: User=Depends(current_user), db: Sess
              "month": entry.month, "actual": entry.actual, "performance_pct": entry.performance_pct,
              "score": entry.score, "final_score": entry.final_score, "status": entry.status,
              "employee_comments": entry.employee_comments, "supervisor_comments": entry.supervisor_comments,
-             "kpi_name": kpi.name, "kpi_code": kpi.code, "target": kpi.target,
+             "kpi_name": kpi.name, "kpi_code": kpi.code, "target": entry.target_snapshot if entry.target_snapshot is not None else kpi.target,
              "unit_notes": kpi.unit_notes, "perspective": kpi.perspective,
              "has_context": entry.context is not None,
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
@@ -136,7 +184,7 @@ def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(re
 
 @router.get("/entries", response_model=list[EntryOut])
 def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depends(get_db), user:User=Depends(current_user)):
-    q=db.query(Entry, Employee.name, KPI.name).join(Employee, Entry.employee_id==Employee.id).join(KPI, Entry.kpi_id==KPI.id)
+    q=db.query(Entry, Employee.name, KPI).join(Employee, Entry.employee_id==Employee.id).join(KPI, Entry.kpi_id==KPI.id)
     if month: q=q.filter(Entry.month==month)
     if user.role == "Employee":
         employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
@@ -145,14 +193,15 @@ def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depend
     elif employee_id:
         q=q.filter(Entry.employee_id==employee_id)
     return [{"id": entry.id, "employee_id": entry.employee_id, "employee_name": employee_name,
-             "kpi_id": entry.kpi_id, "kpi_name": kpi_name, "month": entry.month,
+             "kpi_id": entry.kpi_id, "kpi_name": kpi.name, "month": entry.month,
              "actual": entry.actual, "performance_pct": entry.performance_pct, "score": entry.score,
+             "target": entry.target_snapshot if entry.target_snapshot is not None else kpi.target,
              "final_score": entry.final_score, "status": entry.status,
              "employee_comments": entry.employee_comments,
              "supervisor_comments": entry.supervisor_comments,
              "has_context": entry.context is not None,
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
-            for entry, employee_name, kpi_name in q.all()]
+            for entry, employee_name, kpi in q.all()]
 
 @router.post("/entries/{entry_id}/context")
 def upload_entry_context(entry_id: int, file: UploadFile=File(...), db: Session=Depends(get_db), user: User=Depends(current_user)):

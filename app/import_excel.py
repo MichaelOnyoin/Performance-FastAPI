@@ -1,12 +1,12 @@
 import sys, pandas as pd
 from pathlib import Path
-from .database import Base, engine, SessionLocal
-from .models import Employee, KPI, Entry
+from .database import Base, engine, SessionLocal, ensure_schema
+from .models import Employee, KPI, Entry, EmployeeKPI
 
 def clean(v): return None if pd.isna(v) else v
 
 def run(path):
-    path=Path(path); Base.metadata.create_all(bind=engine); db=SessionLocal()
+    path=Path(path); Base.metadata.create_all(bind=engine); ensure_schema(); db=SessionLocal()
     try:
         employees=pd.read_excel(path,sheet_name="Employees",engine="openpyxl")
         kpis=pd.read_excel(path,sheet_name="KPI_Definitions",engine="openpyxl")
@@ -29,11 +29,17 @@ def run(path):
         for _,r in entries.iterrows():
             emp=db.query(Employee).filter_by(name=str(r["Employee"]).strip()).first(); kpi=db.query(KPI).filter_by(code=str(r["KPI_ID"]).strip()).first()
             if not emp or not kpi or pd.isna(r["Month"]): continue
+            assignment=db.get(EmployeeKPI,(emp.id,kpi.id))
+            if not assignment:
+                assignment=EmployeeKPI(employee_id=emp.id,kpi_id=kpi.id,target=kpi.target,is_active=True)
+                db.add(assignment)
+                db.flush()
             month=pd.to_datetime(r["Month"]).date(); obj=db.query(Entry).filter_by(employee_id=emp.id,kpi_id=kpi.id,month=month).first()
             vals=dict(actual=clean(r.get("Actual")),performance_pct=clean(r.get("Performance %")),score=clean(r.get("Score (1-5)")),final_score=clean(r.get("Final Score")),employee_comments=clean(r.get("Employee Comments")),supervisor_comments=clean(r.get("Supervisor Comments")),status=str(clean(r.get("Status")) or "Draft"))
             if obj:
                 for k,v in vals.items(): setattr(obj,k,v)
-            else: db.add(Entry(employee_id=emp.id,kpi_id=kpi.id,month=month,**vals))
+                if obj.target_snapshot is None: obj.target_snapshot=assignment.target
+            else: db.add(Entry(employee_id=emp.id,kpi_id=kpi.id,month=month,target_snapshot=assignment.target,**vals))
         db.commit(); print("Workbook import complete.")
     finally: db.close()
 

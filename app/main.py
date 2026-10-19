@@ -3,11 +3,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .config import settings
-from .database import Base, engine
+from .database import Base, engine, ensure_schema
 from .api import router
 from fastapi.middleware.cors import CORSMiddleware
 
 Base.metadata.create_all(bind=engine)
+ensure_schema()
 app=FastAPI(title=settings.app_name, version="0.1.0")
 origins = [
     "http://localhost:5173",
