@@ -1,12 +1,17 @@
 from datetime import date
+from difflib import SequenceMatcher
+from io import BytesIO
 import json
+import math
 import mimetypes
+import re
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from openpyxl import load_workbook
 from .database import get_db
 from .models import User, Employee, KPI, Entry, EmployeeKPI
 from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPIOut, EmployeeKPIAssignmentUpdate
@@ -17,6 +22,77 @@ router = APIRouter(prefix="/api")
 CONTEXT_MAGIC = b"HLBCTX1\n"
 MAX_CONTEXT_SIZE = 10 * 1024 * 1024
 ALLOWED_CONTEXT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
+MAX_IMPORT_SIZE = 10 * 1024 * 1024
+
+def _normalized_kpi_name(value) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^[a-z]\s*[.)]\s*", "", text)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+def _parse_excel_entry_rows(content: bytes) -> list[dict]:
+    try:
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:
+        raise HTTPException(400, "Could not read the workbook. Upload a valid .xlsx file.") from exc
+    try:
+        for sheet in workbook.worksheets:
+            for row_index, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+                headers = [_normalized_kpi_name(value) for value in values]
+                kpi_col = next((i for i, value in enumerate(headers)
+                                if value == "kpi" or value.startswith("kpi name") or value.startswith("description") or "key performance indicator" in value), None)
+                id_col = next((i for i, value in enumerate(headers)
+                               if value in ("kpi id", "kpi code", "kpi_id", "code")), None)
+                actual_col = next((i for i, value in enumerate(headers) if "actual" in value), None)
+                comments_col = next((i for i, value in enumerate(headers) if "comment" in value), None)
+                if (kpi_col is not None or id_col is not None) and actual_col is not None:
+                    parsed = []
+                    for excel_row, data in enumerate(sheet.iter_rows(min_row=row_index + 1, values_only=True), start=row_index + 1):
+                        label = data[kpi_col] if kpi_col is not None and kpi_col < len(data) else None
+                        code = data[id_col] if id_col is not None and id_col < len(data) else None
+                        actual = data[actual_col] if actual_col < len(data) else None
+                        comments = data[comments_col] if comments_col is not None and comments_col < len(data) else None
+                        if (label is not None or code is not None) and actual is not None and str(actual).strip() != "":
+                            parsed.append({"label": str(label).strip() if label is not None else None,
+                                           "code": str(code).strip() if code is not None else None,
+                                           "actual": actual,
+                                           "comments": str(comments).strip() if comments is not None else None,
+                                           "row_number": excel_row})
+                    if parsed:
+                        return parsed
+        raise HTTPException(422, "No KPI rows with Actual values were found. Include KPI name or KPI ID, Actual, and optional Comments columns.")
+    finally:
+        workbook.close()
+
+def _match_import_kpi(row: dict, assignments: list[tuple[EmployeeKPI, KPI]]) -> KPI | None:
+    if row.get("code"):
+        raw_code = row["code"].strip()
+        try:
+            numeric_code = float(raw_code)
+            if numeric_code.is_integer():
+                raw_code = str(int(numeric_code))
+        except ValueError:
+            pass
+        for _, kpi in assignments:
+            if raw_code.casefold() == kpi.code.casefold() or raw_code == str(kpi.id):
+                return kpi
+    normalized = _normalized_kpi_name(row.get("label"))
+    if not normalized:
+        return None
+    for _, kpi in assignments:
+        if normalized == _normalized_kpi_name(kpi.name):
+            return kpi
+    candidate_scores = []
+    tokens = set(normalized.split())
+    for _, kpi in assignments:
+        candidate = _normalized_kpi_name(kpi.name)
+        candidate_tokens = set(candidate.split())
+        overlap = len(tokens & candidate_tokens) / max(1, min(len(tokens), len(candidate_tokens)))
+        score = max(SequenceMatcher(None, normalized, candidate).ratio(), overlap)
+        candidate_scores.append((score, kpi))
+    candidate_scores.sort(key=lambda item: item[0], reverse=True)
+    if candidate_scores and candidate_scores[0][0] >= 0.58 and (len(candidate_scores) == 1 or candidate_scores[0][0] - candidate_scores[1][0] >= 0.08):
+        return candidate_scores[0][1]
+    return None
 
 def _pack_context(filename: str, content_type: str, content: bytes) -> bytes:
     metadata = json.dumps({"filename": filename, "content_type": content_type}, ensure_ascii=False).encode("utf-8")
@@ -302,6 +378,86 @@ def review(entry_id:int, data:ReviewUpdate, db:Session=Depends(get_db), _=Depend
 
 @router.post("/admin/generate-month")
 def generate(data:GenerateRequest, db:Session=Depends(get_db), _=Depends(require_roles("Admin","Partner"))): return {"created":generate_month(db,data.month)}
+
+@router.post("/entries/import-excel")
+def import_entry_actuals(file: UploadFile=File(...), month: date=Form(...), employee_id: int|None=Form(default=None),
+                         db: Session=Depends(get_db), user: User=Depends(current_user)):
+    if user.role == "Employee":
+        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+        if not employee:
+            raise HTTPException(404, "No employee profile is linked to this account")
+    elif user.role == "Admin":
+        if employee_id is None:
+            raise HTTPException(422, "Select an employee for this import")
+        employee = db.get(Employee, employee_id)
+        if not employee:
+            raise HTTPException(404, "Employee not found")
+    else:
+        raise HTTPException(403, "Only employees and admins can import KPI actuals")
+
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(415, "Upload an Excel .xlsx workbook")
+    content = file.file.read(MAX_IMPORT_SIZE + 1)
+    if len(content) > MAX_IMPORT_SIZE:
+        raise HTTPException(413, "Excel workbooks must be 10 MB or smaller")
+    rows = _parse_excel_entry_rows(content)
+    reporting_month = date(month.year, month.month, 1)
+    assignments = (db.query(EmployeeKPI, KPI).join(KPI, EmployeeKPI.kpi_id == KPI.id)
+                   .filter(EmployeeKPI.employee_id == employee.id, EmployeeKPI.is_active.is_(True)).all())
+    if not assignments:
+        raise HTTPException(400, "This employee has no active KPI assignments")
+
+    issues = []
+    resolved = []
+    seen_kpis = set()
+    for row in rows:
+        excel_row = row.get("row_number")
+        kpi = _match_import_kpi(row, assignments)
+        if not kpi:
+            issues.append({"row": excel_row, "kpi": row.get("label") or row.get("code"), "reason": "Could not match to an active employee KPI"})
+            continue
+        if kpi.id in seen_kpis:
+            issues.append({"row": excel_row, "kpi": kpi.name, "reason": "Duplicate KPI row; the first matching row was kept"})
+            continue
+        seen_kpis.add(kpi.id)
+        try:
+            actual = float(row["actual"])
+        except (TypeError, ValueError):
+            issues.append({"row": excel_row, "kpi": kpi.name, "reason": "Actual must be a number"})
+            continue
+        if not math.isfinite(actual):
+            issues.append({"row": excel_row, "kpi": kpi.name, "reason": "Actual must be a finite number"})
+            continue
+        resolved.append((row, kpi, actual))
+
+    created_entries = 0
+    for assignment, kpi in assignments:
+        entry = db.query(Entry).filter_by(employee_id=employee.id, kpi_id=kpi.id, month=reporting_month).first()
+        if entry is None:
+            entry = Entry(employee_id=employee.id, kpi_id=kpi.id, month=reporting_month,
+                          target_snapshot=assignment.target, status="Draft")
+            db.add(entry)
+            db.flush()
+            created_entries += 1
+
+    imported = 0
+    protected = 0
+    for row, kpi, actual in resolved:
+        entry = db.query(Entry).filter_by(employee_id=employee.id, kpi_id=kpi.id, month=reporting_month).first()
+        if entry.status not in ("Draft", "Rejected"):
+            protected += 1
+            issues.append({"row": None, "kpi": kpi.name, "reason": f"Entry is {entry.status}; existing reviewed data was left unchanged"})
+            continue
+        if entry.target_snapshot is None:
+            entry.target_snapshot = next(assignment.target for assignment, assigned_kpi in assignments if assigned_kpi.id == kpi.id)
+        entry.actual = actual
+        entry.employee_comments = row["comments"]
+        calculate(entry, kpi)
+        imported += 1
+
+    db.commit()
+    return {"employee_id": employee.id, "employee_name": employee.name, "month": reporting_month.isoformat(),
+            "imported": imported, "created_entries": created_entries, "protected": protected, "issues": issues}
 
 @router.get("/dashboard")
 def dashboard(month:str, db:Session=Depends(get_db), _=Depends(require_roles("Manager","Partner","Admin"))):
