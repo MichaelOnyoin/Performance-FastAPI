@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
 from .models import User, Employee, KPI, Entry, EmployeeKPI
-from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPIOut, EmployeeKPIAssignmentUpdate
+from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
 from .auth import verify_password, hash_password, create_token, current_user, require_roles
 from .services import calculate, generate_month
 
@@ -123,7 +123,7 @@ def signup(data: EmployeeSignup, db: Session = Depends(get_db)):
     employee = db.query(Employee).filter(func.lower(Employee.email) == email).first()
     if not employee:
         raise HTTPException(403, "Your work email was not found. Ask your administrator to add your employee record first.")
-    user = User(email=email, full_name=data.full_name.strip(), password_hash=hash_password(data.password), role="Employee")
+    user = User(email=email, full_name=data.full_name.strip(), password_hash=hash_password(data.password), role="Employee", company=data.company)
     db.add(user)
     db.commit()
     return Token(access_token=create_token(user.email))
@@ -159,9 +159,47 @@ def employees(db: Session=Depends(get_db),
                _=Depends(current_user)
                ): return db.query(Employee).all()
 
+@router.get("/admin/users", response_model=list[UserOut])
+def list_users(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+#def list_users(db: Session=Depends(get_db), _=Depends(current_user)):
+    return db.query(User).order_by(User.full_name, User.email).all()
+
+@router.patch("/admin/users/{user_id}/role", response_model=UserOut)
+def update_user_role(user_id: int, data: UserRoleUpdate, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.id == admin.id and data.role != "Admin":
+        raise HTTPException(400, "You cannot change your own role")
+    if user.role == "Admin" and data.role != "Admin":
+        active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
+        if active_admins <= 1:
+            raise HTTPException(409, "At least one active Admin account must remain")
+    user.role = data.role
+    db.commit()
+    db.refresh(user)
+    return user
+
 @router.get("/kpis", response_model=list[KPIOut])
 def list_kpis(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
     return db.query(KPI).order_by(KPI.code).all()
+
+@router.post("/kpis", response_model=KPIOut, status_code=201)
+def create_kpi(data: KPICreate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    code = data.code.strip()
+    name = data.name.strip()
+    perspective = data.perspective.strip()
+    if not code or not name or not perspective:
+        raise HTTPException(422, "KPI code, name, and perspective cannot be blank")
+    if db.query(KPI).filter(func.lower(KPI.code) == code.lower()).first():
+        raise HTTPException(409, "A KPI with this code already exists")
+    kpi = KPI(code=code, name=name, perspective=perspective,
+              perspective_weight=data.perspective_weight, kpi_weight=data.kpi_weight,
+              target=data.target, unit_notes=data.unit_notes.strip() or None if data.unit_notes else None)
+    db.add(kpi)
+    db.commit()
+    db.refresh(kpi)
+    return kpi
 
 def _employee_kpi_assignments(db: Session, employee_id: int):
     rows = (db.query(EmployeeKPI, KPI).join(KPI, EmployeeKPI.kpi_id == KPI.id)

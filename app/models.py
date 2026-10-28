@@ -11,6 +11,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(30), default="Employee")
     is_active: Mapped[bool] = mapped_column(default=True)
+    company: Mapped[str] = mapped_column(String(255))
 
 class Employee(Base):
     __tablename__ = "employees"
