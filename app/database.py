@@ -21,6 +21,11 @@ def ensure_schema():
     from .models import Entry
 
     inspector = inspect(engine)
+    if inspector.has_table("employees"):
+        employee_columns = {column["name"] for column in inspector.get_columns("employees")}
+        if "is_active" not in employee_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE employees ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
     if not inspector.has_table("entries") or not inspector.has_table("kpis") or not inspector.has_table("employee_kpis"):
         return
     existing_columns = {column["name"] for column in inspector.get_columns("entries")}

@@ -10,7 +10,6 @@ class EmployeeSignup(BaseModel):
     full_name: str = Field(min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    company: str = Field(min_length=8, max_length=255)
 
 class EmployeeCreate(BaseModel):
     name: str
@@ -24,7 +23,7 @@ class EmployeeOut(EmployeeCreate):
     model_config = ConfigDict(from_attributes=True)
 
 class UserRoleUpdate(BaseModel):
-    role: Literal["Admin", "Partner", "Employee"]
+    role: Literal["Admin", "Partner", "Employee", "Manager"]
 
 class UserOut(BaseModel):
     id: int
@@ -32,6 +31,7 @@ class UserOut(BaseModel):
     email: str
     full_name: str
     role: str
+    company: str|None = None
     is_active: bool
     model_config = ConfigDict(from_attributes=True)
 

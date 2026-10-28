@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from .models import Entry, KPI, EmployeeKPI
+from .models import Entry, KPI, EmployeeKPI, Employee
 
 def calculate(entry: Entry, kpi: KPI):
     target = entry.target_snapshot if entry.target_snapshot is not None else kpi.target
@@ -20,7 +20,8 @@ def calculate(entry: Entry, kpi: KPI):
 
 def generate_month(db: Session, month):
     created = 0
-    assignments = db.query(EmployeeKPI).filter(EmployeeKPI.is_active.is_(True)).all()
+    assignments = (db.query(EmployeeKPI).join(Employee, EmployeeKPI.employee_id == Employee.id)
+                   .filter(EmployeeKPI.is_active.is_(True), Employee.is_active.is_(True)).all())
     for assignment in assignments:
         exists = db.query(Entry).filter_by(employee_id=assignment.employee_id, kpi_id=assignment.kpi_id, month=month).first()
         if not exists:

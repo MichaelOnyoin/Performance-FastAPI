@@ -21,6 +21,7 @@ class Employee(Base):
     team: Mapped[str] = mapped_column(String(255), index=True)
     service_line: Mapped[str] = mapped_column(String(255), index=True)
     reviewer: Mapped[str|None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     entries: Mapped[list["Entry"]] = relationship(back_populates="employee")
 
 class KPI(Base):

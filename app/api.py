@@ -120,10 +120,10 @@ def signup(data: EmployeeSignup, db: Session = Depends(get_db)):
     email = data.email.lower()
     if db.query(User).filter(func.lower(User.email) == email).first():
         raise HTTPException(409, "An account with this email already exists")
-    employee = db.query(Employee).filter(func.lower(Employee.email) == email).first()
+    employee = db.query(Employee).filter(func.lower(Employee.email) == email, Employee.is_active.is_(True)).first()
     if not employee:
         raise HTTPException(403, "Your work email was not found. Ask your administrator to add your employee record first.")
-    user = User(email=email, full_name=data.full_name.strip(), password_hash=hash_password(data.password), role="Employee", company=data.company)
+    user = User(email=email, full_name=data.full_name.strip(), password_hash=hash_password(data.password), role="Employee", company=employee.team)
     db.add(user)
     db.commit()
     return Token(access_token=create_token(user.email))
@@ -157,12 +157,17 @@ def employee_profile(user: User = Depends(current_user), db: Session = Depends(g
 @router.get("/employees", response_model=list[EmployeeOut])
 def employees(db: Session=Depends(get_db),
                _=Depends(current_user)
-               ): return db.query(Employee).all()
+               ): return db.query(Employee).filter(Employee.is_active.is_(True)).all()
 
 @router.get("/admin/users", response_model=list[UserOut])
 def list_users(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
 #def list_users(db: Session=Depends(get_db), _=Depends(current_user)):
     return db.query(User).order_by(User.full_name, User.email).all()
+
+@router.get("/reviewers", response_model=list[UserOut])
+def list_reviewers(db: Session=Depends(get_db), _=Depends(require_roles("Admin", "Partner"))):
+    return (db.query(User).filter(User.is_active.is_(True), User.role.in_(("Partner", "Manager")))
+            .order_by(User.full_name, User.email).all())
 
 @router.patch("/admin/users/{user_id}/role", response_model=UserOut)
 def update_user_role(user_id: int, data: UserRoleUpdate, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
@@ -179,6 +184,21 @@ def update_user_role(user_id: int, data: UserRoleUpdate, db: Session=Depends(get
     db.commit()
     db.refresh(user)
     return user
+
+@router.delete("/admin/users/{user_id}", status_code=204)
+def delete_user(user_id: int, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.id == admin.id:
+        raise HTTPException(400, "You cannot delete your own account")
+    if user.role == "Admin" and user.is_active:
+        active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
+        if active_admins <= 1:
+            raise HTTPException(409, "At least one active Admin account must remain")
+    db.delete(user)
+    db.commit()
+    return Response(status_code=204)
 
 @router.get("/kpis", response_model=list[KPIOut])
 def list_kpis(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
@@ -212,13 +232,15 @@ def _employee_kpi_assignments(db: Session, employee_id: int):
 
 @router.get("/admin/employees/{employee_id}/kpis")
 def get_employee_kpis(employee_id: int, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
-    if not db.get(Employee, employee_id):
+    employee = db.get(Employee, employee_id)
+    if not employee or not employee.is_active:
         raise HTTPException(404, "Employee not found")
     return _employee_kpi_assignments(db, employee_id)
 
 @router.put("/admin/employees/{employee_id}/kpis")
 def set_employee_kpis(employee_id: int, data: EmployeeKPIAssignmentUpdate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
-    if not db.get(Employee, employee_id):
+    employee = db.get(Employee, employee_id)
+    if not employee or not employee.is_active:
         raise HTTPException(404, "Employee not found")
     ids = [assignment.kpi_id for assignment in data.assignments]
     if len(ids) != len(set(ids)):
@@ -295,6 +317,27 @@ def my_entries(month: date|None=None, user: User=Depends(current_user), db: Sess
 def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(require_roles("Admin","Partner"))):
 #def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(current_user)):
     obj=Employee(**data.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
+
+@router.delete("/admin/employees/{employee_id}", status_code=204)
+def delete_employee(employee_id: int, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
+    employee = db.get(Employee, employee_id)
+    if not employee:
+        raise HTTPException(404, "Employee not found")
+    linked_user = None
+    if employee.email:
+        linked_user = db.query(User).filter(func.lower(User.email) == employee.email.lower()).first()
+        if linked_user:
+            if linked_user.id == admin.id:
+                raise HTTPException(409, "Cannot delete the employee record linked to your admin account")
+            if linked_user.role == "Admin" and linked_user.is_active:
+                active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
+                if active_admins <= 1:
+                    raise HTTPException(409, "At least one active Admin account must remain")
+    employee.is_active = False
+    if linked_user:
+        db.delete(linked_user)
+    db.commit()
+    return Response(status_code=204)
 
 @router.get("/entries", response_model=list[EntryOut])
 def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depends(get_db), user:User=Depends(current_user)):
@@ -500,18 +543,18 @@ def import_entry_actuals(file: UploadFile=File(...), month: date=Form(...), empl
 @router.get("/dashboard")
 def dashboard(month:str, db:Session=Depends(get_db), _=Depends(require_roles("Manager","Partner","Admin"))):
     team_rows=(db.query(Employee.team,func.avg(Entry.final_score)).join(Entry).filter(Entry.month==month).group_by(Employee.team).all())
-    people=(db.query(Employee.id, Employee.name, Employee.team, func.sum(Entry.final_score), func.sum(Entry.actual))
+    people=(db.query(Employee.id, Employee.name, Employee.team, func.sum(Entry.final_score))
             .join(Entry).filter(Entry.month==month).group_by(Employee.id).all())
-    return {"month":month,"teams":[{"team":x,"average_score":y or 0} for x,y in team_rows],"employees":[{"employee_id":employee_id,"employee":name,"team":team,"total_score":total_score or 0,"sum_actual":sum_actual or 0} for employee_id,name,team,total_score,sum_actual in people]}
+    return {"month":month,"teams":[{"team":x,"average_score":y or 0} for x,y in team_rows],"employees":[{"employee_id":employee_id,"employee":name,"team":team,"total_score":total_score or 0,"percentage_score":(total_score or 0) / 5 * 100} for employee_id,name,team,total_score in people]}
 
 @router.get("/dashboard/employee-trend")
 def employee_trend(employee_id:int, year:int, db:Session=Depends(get_db), _=Depends(require_roles("Manager","Partner","Admin"))):
     employee = db.get(Employee, employee_id)
     if not employee: raise HTTPException(404, "Employee not found")
     start, end = date(year, 1, 1), date(year + 1, 1, 1)
-    rows = (db.query(Entry.month, func.sum(Entry.actual))
+    rows = (db.query(Entry.month, func.sum(Entry.final_score))
               .filter(Entry.employee_id == employee_id, Entry.month >= start, Entry.month < end)
               .group_by(Entry.month).order_by(Entry.month).all())
-    actual_by_month = {month.month: actual or 0 for month, actual in rows}
+    percentage_by_month = {month.month: (total_score or 0) / 5 * 100 for month, total_score in rows}
     return {"employee_id":employee.id,"employee":employee.name,"year":year,
-            "points":[{"month":date(year, month, 1).isoformat(), "sum_actual":actual_by_month.get(month, 0)} for month in range(1, 13)]}
+            "points":[{"month":date(year, month, 1).isoformat(), "percentage_score":percentage_by_month.get(month, 0)} for month in range(1, 13)]}
