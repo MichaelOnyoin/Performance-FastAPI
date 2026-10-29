@@ -1,9 +1,27 @@
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from .config import settings
+import os 
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
+DATABASE_URL = os.environ.get("DB_URL")
+# connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+# engine = create_engine(settings.database_url, connect_args=connect_args)
+if DATABASE_URL:
+    # Fix legacy Vercel environment prefixes if necessary
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+else:
+    # 2. Local fallback: Write directly to an absolute temp path if deployed, or local file
+    if os.environ.get("VERCEL"):
+        DATABASE_URL = "sqlite:////tmp/performance.db"  # Writable folder inside Vercel
+    else:
+        # Local computer fallback - make sure folder exists
+        os.makedirs("./data", exist_ok=True)
+        DATABASE_URL = "sqlite:///./data/performance.db"
+
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
