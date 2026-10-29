@@ -1,10 +1,13 @@
-from datetime import date
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from io import BytesIO
+import hashlib
 import json
 import math
 import mimetypes
 import re
+import secrets
+import logging
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
@@ -13,12 +16,15 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
-from .models import User, Employee, KPI, Entry, EmployeeKPI
-from .schemas import Token, EmployeeSignup, EmployeeCreate, EmployeeOut, EntryUpdate, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
+from .models import User, Employee, KPI, Entry, EmployeeKPI, PasswordResetToken
+from .schemas import Token, EmployeeSignup, ForgotPasswordRequest, ResetPasswordRequest, EmployeeCreate, EmployeeOut, EntryUpdate, BulkEntrySubmission, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
 from .auth import verify_password, hash_password, create_token, current_user, require_roles
 from .services import calculate, generate_month
+from .config import settings
+from .mailer import password_reset_email_configured, send_password_reset_email
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 CONTEXT_MAGIC = b"HLBCTX1\n"
 MAX_CONTEXT_SIZE = 10 * 1024 * 1024
 ALLOWED_CONTEXT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".png", ".jpg", ".jpeg"}
@@ -128,6 +134,56 @@ def signup(data: EmployeeSignup, db: Session = Depends(get_db)):
     db.commit()
     return Token(access_token=create_token(user.email))
 
+@router.post("/auth/forgot-password")
+def forgot_password(data: ForgotPasswordRequest, db: Session=Depends(get_db)):
+    if not password_reset_email_configured():
+        raise HTTPException(503, "Password reset email is not configured. Contact your administrator.")
+    user = db.query(User).filter(func.lower(User.email) == data.email.lower(), User.is_active.is_(True)).first()
+    if user:
+        now = datetime.utcnow()
+        db.query(PasswordResetToken).filter(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None)
+        ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+        token = secrets.token_urlsafe(32)
+        reset_token = PasswordResetToken(
+            user_id=user.id,
+            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            expires_at=now + timedelta(minutes=30),
+        )
+        db.add(reset_token)
+        db.commit()
+        reset_url = f"{settings.frontend_url.rstrip('/')}/reset-password?token={quote(token)}"
+        try:
+            send_password_reset_email(user.email, reset_url)
+        except Exception:
+            reset_token.used_at = datetime.utcnow()
+            db.commit()
+            logger.exception("Unable to send a password reset email")
+    return {"message": "If an active account exists for that email, a reset link will be sent shortly."}
+
+@router.post("/auth/reset-password")
+def reset_password(data: ResetPasswordRequest, db: Session=Depends(get_db)):
+    token_hash = hashlib.sha256(data.token.encode("utf-8")).hexdigest()
+    reset_token = db.query(PasswordResetToken).filter(
+        PasswordResetToken.token_hash == token_hash,
+        PasswordResetToken.used_at.is_(None),
+        PasswordResetToken.expires_at > datetime.utcnow(),
+    ).first()
+    if not reset_token:
+        raise HTTPException(400, "This password reset link is invalid or has expired. Request a new link.")
+    user = db.get(User, reset_token.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(400, "This password reset link is invalid or has expired. Request a new link.")
+    now = datetime.utcnow()
+    user.password_hash = hash_password(data.new_password)
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: now}, synchronize_session=False)
+    db.commit()
+    return {"message": "Your password has been reset. You can now sign in with your new password."}
+
 @router.post("/auth/token", response_model=Token)
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(func.lower(User.email) == form.username.lower()).first()
@@ -196,6 +252,7 @@ def delete_user(user_id: int, db: Session=Depends(get_db), admin: User=Depends(r
         active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
         if active_admins <= 1:
             raise HTTPException(409, "At least one active Admin account must remain")
+    db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
     return Response(status_code=204)
@@ -313,6 +370,36 @@ def my_entries(month: date|None=None, user: User=Depends(current_user), db: Sess
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
             for entry, kpi in query.order_by(KPI.perspective, KPI.name).all()]
 
+@router.post("/my/entries/submit")
+def submit_month_entries(month: date, data: BulkEntrySubmission, user: User=Depends(current_user), db: Session=Depends(get_db)):
+    if user.role != "Employee":
+        raise HTTPException(403, "Only employees can submit their KPI actuals")
+    employee = db.query(Employee).filter(
+        func.lower(Employee.email) == user.email.lower(), Employee.is_active.is_(True)
+    ).first()
+    if not employee:
+        raise HTTPException(404, "No active employee profile is linked to this account")
+    submitted_ids = [item.entry_id for item in data.entries]
+    if len(submitted_ids) != len(set(submitted_ids)):
+        raise HTTPException(422, "Each KPI entry can only be included once")
+    editable_rows = (db.query(Entry, KPI).join(KPI, Entry.kpi_id == KPI.id)
+                     .filter(Entry.employee_id == employee.id, Entry.month == month,
+                             Entry.status.in_(("Draft", "Rejected"))).all())
+    editable_ids = {entry.id for entry, _ in editable_rows}
+    if not editable_ids:
+        raise HTTPException(400, "There are no draft or rejected KPI entries to submit for this month")
+    if set(submitted_ids) != editable_ids:
+        raise HTTPException(422, "Submit every draft or rejected KPI entry for the selected month together")
+    actuals = {item.entry_id: item for item in data.entries}
+    for entry, kpi in editable_rows:
+        item = actuals[entry.id]
+        entry.actual = item.actual
+        entry.employee_comments = item.employee_comments
+        calculate(entry, kpi)
+        entry.status = "Submitted"
+    db.commit()
+    return {"submitted": len(editable_rows), "month": month.isoformat()}
+
 
 @router.post("/employees", response_model=EmployeeOut)
 def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(require_roles("Admin","Partner"))):
@@ -336,6 +423,7 @@ def delete_employee(employee_id: int, db: Session=Depends(get_db), admin: User=D
                     raise HTTPException(409, "At least one active Admin account must remain")
     employee.is_active = False
     if linked_user:
+        db.query(PasswordResetToken).filter(PasswordResetToken.user_id == linked_user.id).delete(synchronize_session=False)
         db.delete(linked_user)
     db.commit()
     return Response(status_code=204)

@@ -14,6 +14,7 @@ app=FastAPI(title=settings.app_name, version="0.1.0")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "*"
 ]
 app.include_router(router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -25,7 +26,6 @@ def health(): return {"status":"ok"}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    #allow_origins=["*","http://localhost:5173","http://127.0.0.1:8000","http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -11,6 +11,13 @@ class EmployeeSignup(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    new_password: str = Field(min_length=8, max_length=128)
+
 class EmployeeCreate(BaseModel):
     name: str
     email: EmailStr|None = None
@@ -52,6 +59,14 @@ class UserOut(BaseModel):
 class EntryUpdate(BaseModel):
     actual: float|None = None
     employee_comments: str|None = None
+
+class BulkEntryActual(BaseModel):
+    entry_id: int
+    actual: float
+    employee_comments: str|None = None
+
+class BulkEntrySubmission(BaseModel):
+    entries: list[BulkEntryActual] = Field(min_length=1)
 
 class ReviewUpdate(BaseModel):
     status: str = Field(pattern="^(Approved|Rejected)$")

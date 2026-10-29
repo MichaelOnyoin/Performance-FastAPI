@@ -11,6 +11,9 @@ A firm-wide starter application for employee KPI capture, review/approval, partn
 6. Start with `uvicorn app.main:app --reload`.
 7. Browse to `http://127.0.0.1:8000` and API docs at `/docs`.
 
+## Password reset email
+Forgot-password links are delivered through SMTP. Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM_EMAIL` in `.env`; `SMTP_USE_TLS=true` enables STARTTLS. `SMTP_USERNAME` and `SMTP_PASSWORD` may be left empty for an SMTP relay that does not require authentication. Set `FRONTEND_URL` to the React app's public base URL so reset links return to the correct site, then restart the API. Reset links expire after 30 minutes and can only be used once.
+
 Default seeded admin: `admin@hlb.local` / `ChangeMe123!` — change immediately.
 
 ## Import the HLB workbook
