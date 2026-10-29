@@ -14,7 +14,8 @@ app=FastAPI(title=settings.app_name, version="0.1.0")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "*"
+    "*",
+    "https://performance-react-nine.vercel.app/"
 ]
 app.include_router(router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
