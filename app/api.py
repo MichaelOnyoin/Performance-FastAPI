@@ -201,7 +201,8 @@ def delete_user(user_id: int, db: Session=Depends(get_db), admin: User=Depends(r
     return Response(status_code=204)
 
 @router.get("/kpis", response_model=list[KPIOut])
-def list_kpis(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+# def list_kpis(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+def list_kpis(db: Session=Depends(get_db)):
     return db.query(KPI).order_by(KPI.code).all()
 
 @router.post("/kpis", response_model=KPIOut, status_code=201)
