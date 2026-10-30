@@ -5,8 +5,8 @@ class Settings(BaseSettings):
     secret_key: str = "dev-only-change-me"
     database_url: str = "sqlite:///./data/performance.db"
     access_token_minutes: int = 480
-    frontend_url: str = "http://localhost:5173"
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://performance-react-nine.vercel.app,https://hlb.onyoin.com/"
+    frontend_url: str = "https://hlb.onyoin.com"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://performance-react-nine.vercel.app,https://hlb.onyoin.com,https://jrc-performance.vercel.app,https://jrc.onyoin.com"
     smtp_host: str|None = None
     smtp_port: int = 587
     smtp_username: str|None = None
