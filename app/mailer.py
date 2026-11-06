@@ -12,7 +12,7 @@ SMTP_EMAIL=os.environ.get("SMTP_FROM_EMAIL")
 def password_reset_email_configured() -> bool:
     return all((settings.smtp_host, settings.smtp_from_email))
 
-print(settings.smtp_host, settings.smtp_from_email, settings.smtp_password)
+#print(settings.smtp_host, settings.smtp_from_email, settings.smtp_password)
 
 def send_password_reset_email(recipient: str, reset_url: str) -> None:
     message = EmailMessage()
