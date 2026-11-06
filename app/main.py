@@ -3,15 +3,17 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from .config import settings
-from .database import Base, engine
- #ensure_schema
+from .database import Base, engine, ensure_review_schema
 from .api import router
 from fastapi.middleware.cors import CORSMiddleware
 
 Base.metadata.create_all(bind=engine)
-#ensure_schema()
+ensure_review_schema()
 app=FastAPI(title=settings.app_name, version="0.1.0")
-origins = [origin.strip().rstrip("/") for origin in settings.cors_origins.split(",") if origin.strip()]
+#origins = [origin.strip().rstrip("/") for origin in settings.cors_origins.split(",") if origin.strip()]
+origins = [
+    "*"
+]
 app.include_router(router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

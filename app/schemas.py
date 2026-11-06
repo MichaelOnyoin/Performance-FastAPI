@@ -27,10 +27,11 @@ class EmployeeCreate(BaseModel):
 
 class EmployeeOut(EmployeeCreate):
     id: int
+    is_active: bool = True
     model_config = ConfigDict(from_attributes=True)
 
 class UserRoleUpdate(BaseModel):
-    role: Literal["Admin", "Partner", "Employee", "Manager"]
+    role: Literal["Admin", "Partner", "Employee", "Manager","Supervisor"]
 
 class UserOut(BaseModel):
     id: int
@@ -71,6 +72,10 @@ class BulkEntrySubmission(BaseModel):
 class ReviewUpdate(BaseModel):
     status: str = Field(pattern="^(Approved|Rejected)$")
     supervisor_comments: str|None = None
+    partner_comments: str|None = None
+
+class SupervisorAssignmentUpdate(BaseModel):
+    supervisor_user_id: int|None = None
 
 class GenerateRequest(BaseModel):
     month: date
@@ -125,6 +130,8 @@ class EntryOut(BaseModel):
     status: str
     employee_comments: str|None = None
     supervisor_comments: str|None = None
+    partner_comments: str|None = None
+    can_review: bool = False
     has_context: bool = False
     context_filename: str|None = None
     model_config = ConfigDict(from_attributes=True)

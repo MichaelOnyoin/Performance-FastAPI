@@ -4,8 +4,7 @@ from .config import settings
 import os 
 
 DATABASE_URL = os.environ.get("DB_URL")
-# connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-# engine = create_engine(settings.database_url, connect_args=connect_args)
+
 if DATABASE_URL:
     # Fix legacy Vercel environment prefixes if necessary
     if DATABASE_URL.startswith("postgres://"):
@@ -19,8 +18,9 @@ else:
         os.makedirs("./data", exist_ok=True)
         DATABASE_URL = "sqlite:///./data/performance.db"
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+#connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+#engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -33,6 +33,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def ensure_review_schema():
+    inspector = inspect(engine)
+    if inspector.has_table("entries"):
+        columns = {column["name"] for column in inspector.get_columns("entries")}
+        if "partner_comments" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE entries ADD COLUMN partner_comments TEXT"))
 
 # def ensure_schema():
 #     """Apply the small additive migrations needed by existing development databases."""

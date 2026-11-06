@@ -32,6 +32,11 @@ class Employee(Base):
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     entries: Mapped[list["Entry"]] = relationship(back_populates="employee")
 
+class EmployeeSupervisor(Base):
+    __tablename__ = "employee_supervisors"
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), primary_key=True)
+    supervisor_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+
 class KPI(Base):
     __tablename__ = "kpis"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -65,6 +70,7 @@ class Entry(Base):
     target_snapshot: Mapped[float|None] = mapped_column(Float, nullable=True)
     employee_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
     supervisor_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
+    partner_comments: Mapped[str|None] = mapped_column(Text, nullable=True)
     context: Mapped[bytes|None] = mapped_column(LargeBinary, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="Draft", index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

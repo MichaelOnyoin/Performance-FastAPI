@@ -16,8 +16,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
-from .models import User, Employee, KPI, Entry, EmployeeKPI, PasswordResetToken
-from .schemas import Token, EmployeeSignup, ForgotPasswordRequest, ResetPasswordRequest, EmployeeCreate, EmployeeOut, EntryUpdate, BulkEntrySubmission, ReviewUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
+from .models import User, Employee, KPI, Entry, EmployeeKPI, EmployeeSupervisor, PasswordResetToken
+from .schemas import Token, EmployeeSignup, ForgotPasswordRequest, ResetPasswordRequest, EmployeeCreate, EmployeeOut, EntryUpdate, BulkEntrySubmission, ReviewUpdate, SupervisorAssignmentUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
 from .auth import verify_password, hash_password, create_token, current_user, require_roles
 from .services import calculate, generate_month
 from .config import settings
@@ -113,10 +113,39 @@ def _unpack_context(value: bytes) -> tuple[str, str, bytes]:
         return header["filename"], header["content_type"], value[header_start + header_size:]
     return "supporting-document", "application/octet-stream", value
 
+def _linked_employee(user: User, db: Session) -> Employee|None:
+    return db.query(Employee).filter(
+        func.lower(Employee.email) == user.email.lower(), Employee.is_active.is_(True)
+    ).first()
+
+def _supervised_employee_ids(user: User, db: Session) -> set[int]:
+    return {row[0] for row in db.query(EmployeeSupervisor.employee_id)
+            .join(Employee, EmployeeSupervisor.employee_id == Employee.id)
+            .filter(EmployeeSupervisor.supervisor_user_id == user.id, Employee.is_active.is_(True)).all()}
+
+def _supervisor_assigned(employee_id: int, db: Session) -> bool:
+    return db.query(EmployeeSupervisor.employee_id).filter(
+        EmployeeSupervisor.employee_id == employee_id
+    ).first() is not None
+
+def _is_own_employee(user: User, employee_id: int, db: Session) -> bool:
+    own = _linked_employee(user, db)
+    return bool(own and own.id == employee_id)
+
+def _can_review_entry(user: User, entry: Entry, db: Session) -> bool:
+    if user.role == "Supervisor":
+        return entry.status == "Submitted" and entry.employee_id in _supervised_employee_ids(user, db) and not _is_own_employee(user, entry.employee_id, db)
+    if user.role == "Partner":
+        return entry.status == "Supervisor Approved" and not _is_own_employee(user, entry.employee_id, db)
+    return False
+
 def _check_entry_access(entry: Entry, user: User, db: Session):
     if user.role == "Employee":
-        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+        employee = _linked_employee(user, db)
         if not employee or employee.id != entry.employee_id:
+            raise HTTPException(404, "Entry not found")
+    elif user.role == "Supervisor":
+        if not (_is_own_employee(user, entry.employee_id, db) or entry.employee_id in _supervised_employee_ids(user, db)):
             raise HTTPException(404, "Entry not found")
     elif user.role not in ("Admin", "Manager", "Partner"):
         raise HTTPException(403, "Insufficient permissions")
@@ -211,9 +240,20 @@ def employee_profile(user: User = Depends(current_user), db: Session = Depends(g
                        for month, score, actual in rows]}
 
 @router.get("/employees", response_model=list[EmployeeOut])
-def employees(db: Session=Depends(get_db),
-               _=Depends(current_user)
-               ): return db.query(Employee).filter(Employee.is_active.is_(True)).all()
+def employees(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    query = db.query(Employee).filter(Employee.is_active.is_(True))
+    if user.role == "Employee":
+        own = _linked_employee(user, db)
+        return [own] if own else []
+    if user.role == "Supervisor":
+        allowed_ids = _supervised_employee_ids(user, db)
+        own = _linked_employee(user, db)
+        if own:
+            allowed_ids.add(own.id)
+        return query.filter(Employee.id.in_(allowed_ids)).all() if allowed_ids else []
+    if user.role not in ("Admin", "Partner", "Manager"):
+        raise HTTPException(403, "Insufficient permissions")
+    return query.all()
 
 @router.get("/admin/users", response_model=list[UserOut])
 def list_users(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
@@ -222,8 +262,44 @@ def list_users(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
 
 @router.get("/reviewers", response_model=list[UserOut])
 def list_reviewers(db: Session=Depends(get_db), _=Depends(require_roles("Admin", "Partner"))):
-    return (db.query(User).filter(User.is_active.is_(True), User.role.in_(("Partner", "Manager")))
+    return (db.query(User).filter(User.is_active.is_(True), User.role == "Supervisor")
             .order_by(User.full_name, User.email).all())
+
+@router.get("/admin/supervision")
+def list_supervision(db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    rows = (db.query(Employee, EmployeeSupervisor.supervisor_user_id, User.full_name)
+            .outerjoin(EmployeeSupervisor, EmployeeSupervisor.employee_id == Employee.id)
+            .outerjoin(User, User.id == EmployeeSupervisor.supervisor_user_id)
+            .filter(Employee.is_active.is_(True)).order_by(Employee.name).all())
+    return [{"employee_id": employee.id, "employee_name": employee.name,
+             "supervisor_user_id": supervisor_id, "supervisor_name": supervisor_name}
+            for employee, supervisor_id, supervisor_name in rows]
+
+@router.put("/admin/employees/{employee_id}/supervisor")
+def assign_employee_supervisor(employee_id: int, data: SupervisorAssignmentUpdate,
+                               db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    employee = db.get(Employee, employee_id)
+    if not employee or not employee.is_active:
+        raise HTTPException(404, "Employee not found")
+    assignment = db.get(EmployeeSupervisor, employee_id)
+    if data.supervisor_user_id is None:
+        if assignment:
+            db.delete(assignment)
+        db.commit()
+        return {"employee_id": employee_id, "supervisor_user_id": None}
+    supervisor = db.get(User, data.supervisor_user_id)
+    if not supervisor or not supervisor.is_active or supervisor.role != "Supervisor":
+        raise HTTPException(422, "Choose an active user with the Supervisor role")
+    if employee.email and employee.email.lower() == supervisor.email.lower():
+        raise HTTPException(422, "An employee cannot supervise their own KPI entries")
+    if assignment is None:
+        assignment = EmployeeSupervisor(employee_id=employee_id, supervisor_user_id=supervisor.id)
+        db.add(assignment)
+    else:
+        assignment.supervisor_user_id = supervisor.id
+    db.commit()
+    return {"employee_id": employee_id, "supervisor_user_id": supervisor.id,
+            "supervisor_name": supervisor.full_name}
 
 @router.patch("/admin/users/{user_id}/role", response_model=UserOut)
 def update_user_role(user_id: int, data: UserRoleUpdate, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
@@ -232,6 +308,10 @@ def update_user_role(user_id: int, data: UserRoleUpdate, db: Session=Depends(get
         raise HTTPException(404, "User not found")
     if user.id == admin.id and data.role != "Admin":
         raise HTTPException(400, "You cannot change your own role")
+    if user.role == "Supervisor" and data.role != "Supervisor":
+        assigned_count = db.query(EmployeeSupervisor).filter(EmployeeSupervisor.supervisor_user_id == user.id).count()
+        if assigned_count:
+            raise HTTPException(409, "Reassign or remove this supervisor's employees before changing their role")
     if user.role == "Admin" and data.role != "Admin":
         active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
         if active_admins <= 1:
@@ -252,6 +332,7 @@ def delete_user(user_id: int, db: Session=Depends(get_db), admin: User=Depends(r
         active_admins = db.query(User).filter(User.role == "Admin", User.is_active.is_(True)).count()
         if active_admins <= 1:
             raise HTTPException(409, "At least one active Admin account must remain")
+    db.query(EmployeeSupervisor).filter(EmployeeSupervisor.supervisor_user_id == user.id).delete(synchronize_session=False)
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
@@ -354,7 +435,7 @@ def update_kpi(kpi_id: int, data: KPIUpdate, db: Session=Depends(get_db), _=Depe
 
 @router.get("/my/entries")
 def my_entries(month: date|None=None, user: User=Depends(current_user), db: Session=Depends(get_db)):
-    employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    employee = _linked_employee(user, db)
     if not employee:
         raise HTTPException(404, "No employee profile is linked to this account")
     query = db.query(Entry, KPI).join(KPI, Entry.kpi_id == KPI.id).filter(Entry.employee_id == employee.id)
@@ -364,6 +445,7 @@ def my_entries(month: date|None=None, user: User=Depends(current_user), db: Sess
              "month": entry.month, "actual": entry.actual, "performance_pct": entry.performance_pct,
              "score": entry.score, "final_score": entry.final_score, "status": entry.status,
              "employee_comments": entry.employee_comments, "supervisor_comments": entry.supervisor_comments,
+             "partner_comments": entry.partner_comments,
              "kpi_name": kpi.name, "kpi_code": kpi.code, "target": entry.target_snapshot if entry.target_snapshot is not None else kpi.target,
              "unit_notes": kpi.unit_notes, "perspective": kpi.perspective,
              "has_context": entry.context is not None,
@@ -372,13 +454,13 @@ def my_entries(month: date|None=None, user: User=Depends(current_user), db: Sess
 
 @router.post("/my/entries/submit")
 def submit_month_entries(month: date, data: BulkEntrySubmission, user: User=Depends(current_user), db: Session=Depends(get_db)):
-    if user.role != "Employee":
-        raise HTTPException(403, "Only employees can submit their KPI actuals")
-    employee = db.query(Employee).filter(
-        func.lower(Employee.email) == user.email.lower(), Employee.is_active.is_(True)
-    ).first()
+    if user.role not in ("Employee", "Supervisor", "Partner"):
+        raise HTTPException(403, "This account cannot submit personal KPI actuals")
+    employee = _linked_employee(user, db)
     if not employee:
         raise HTTPException(404, "No active employee profile is linked to this account")
+    if not _supervisor_assigned(employee.id, db):
+        raise HTTPException(409, "An Admin must assign a Supervisor before you can submit KPI actuals")
     submitted_ids = [item.entry_id for item in data.entries]
     if len(submitted_ids) != len(set(submitted_ids)):
         raise HTTPException(422, "Each KPI entry can only be included once")
@@ -422,7 +504,11 @@ def delete_employee(employee_id: int, db: Session=Depends(get_db), admin: User=D
                 if active_admins <= 1:
                     raise HTTPException(409, "At least one active Admin account must remain")
     employee.is_active = False
+    assignment = db.get(EmployeeSupervisor, employee_id)
+    if assignment:
+        db.delete(assignment)
     if linked_user:
+        db.query(EmployeeSupervisor).filter(EmployeeSupervisor.supervisor_user_id == linked_user.id).delete(synchronize_session=False)
         db.query(PasswordResetToken).filter(PasswordResetToken.user_id == linked_user.id).delete(synchronize_session=False)
         db.delete(linked_user)
     db.commit()
@@ -433,21 +519,34 @@ def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depend
     q=db.query(Entry, Employee.name, KPI).join(Employee, Entry.employee_id==Employee.id).join(KPI, Entry.kpi_id==KPI.id)
     if month: q=q.filter(Entry.month==month)
     if user.role == "Employee":
-        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+        employee = _linked_employee(user, db)
         if not employee: raise HTTPException(404, "No employee profile is linked to this account")
         q=q.filter(Entry.employee_id==employee.id)
-    elif employee_id:
-        q=q.filter(Entry.employee_id==employee_id)
+    elif user.role == "Supervisor":
+        visible_ids = _supervised_employee_ids(user, db)
+        q = q.filter(Entry.employee_id.in_(visible_ids)) if visible_ids else q.filter(Entry.id == -1)
+        if employee_id:
+            q = q.filter(Entry.employee_id == employee_id)
+    elif user.role in ("Partner", "Admin", "Manager"):
+        if employee_id:
+            q=q.filter(Entry.employee_id==employee_id)
+    else:
+        raise HTTPException(403, "Insufficient permissions")
+    rows = q.all()
+    own_employee = _linked_employee(user, db) if user.role in ("Supervisor", "Partner") else None
+    supervised_ids = _supervised_employee_ids(user, db) if user.role == "Supervisor" else set()
     return [{"id": entry.id, "employee_id": entry.employee_id, "employee_name": employee_name,
              "kpi_id": entry.kpi_id, "kpi_name": kpi.name, "month": entry.month,
              "actual": entry.actual, "performance_pct": entry.performance_pct, "score": entry.score,
              "target": entry.target_snapshot if entry.target_snapshot is not None else kpi.target,
              "final_score": entry.final_score, "status": entry.status,
              "employee_comments": entry.employee_comments,
-             "supervisor_comments": entry.supervisor_comments,
+             "supervisor_comments": entry.supervisor_comments, "partner_comments": entry.partner_comments,
+             "can_review": ((user.role == "Supervisor" and entry.status == "Submitted" and entry.employee_id in supervised_ids and (not own_employee or own_employee.id != entry.employee_id)) or
+                            (user.role == "Partner" and entry.status == "Supervisor Approved" and (not own_employee or own_employee.id != entry.employee_id))),
              "has_context": entry.context is not None,
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
-            for entry, employee_name, kpi in q.all()]
+            for entry, employee_name, kpi in rows]
 
 @router.post("/entries/{entry_id}/context")
 def upload_entry_context(entry_id: int, file: UploadFile=File(...), db: Session=Depends(get_db), user: User=Depends(current_user)):
@@ -498,22 +597,22 @@ def delete_entry_context(entry_id: int, db: Session=Depends(get_db), user: User=
 
 @router.patch("/entries/{entry_id}", response_model=EntryOut, response_model_exclude_unset=True)
 def update_entry(entry_id:int, data:EntryUpdate, db:Session=Depends(get_db), user:User=Depends(current_user)):
-    if user.role != "Employee":
-        raise HTTPException(403, "Only employees can edit their KPI actuals")
+    if user.role not in ("Employee", "Supervisor", "Partner"):
+        raise HTTPException(403, "This account cannot edit personal KPI actuals")
     obj=db.get(Entry, entry_id)
     if not obj or obj.status not in ("Draft","Rejected"): raise HTTPException(400,"Entry unavailable for editing")
-    employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    employee = _linked_employee(user, db)
     if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
     for k,v in data.model_dump(exclude_unset=True).items(): setattr(obj,k,v)
     calculate(obj, db.get(KPI,obj.kpi_id)); db.commit(); db.refresh(obj); return obj
 
 @router.patch("/entries/{entry_id}/review-edit", response_model=EntryOut, response_model_exclude_unset=True)
-def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(get_db), user: User=Depends(current_user)):
     entry = db.get(Entry, entry_id)
     if not entry:
         raise HTTPException(404, "Entry not found")
-    if entry.status != "Submitted":
-        raise HTTPException(400, "Only entries awaiting review can be edited by a reviewer")
+    if not _can_review_entry(user, entry, db):
+        raise HTTPException(403, "This entry is not in your review queue")
     changes = data.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(400, "No entry changes provided")
@@ -526,25 +625,36 @@ def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(ge
 
 @router.post("/entries/{entry_id}/submit", response_model=EntryOut, response_model_exclude_unset=True)
 def submit(entry_id:int, db:Session=Depends(get_db), user:User=Depends(current_user)):
-    if user.role != "Employee":
-        raise HTTPException(403, "Only employees can submit their KPI actuals")
+    if user.role not in ("Employee", "Supervisor", "Partner"):
+        raise HTTPException(403, "This account cannot submit personal KPI actuals")
     obj=db.get(Entry,entry_id)
     if not obj or obj.actual is None: raise HTTPException(400,"Actual is required")
-    employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    employee = _linked_employee(user, db)
     if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
     if obj.status not in ("Draft", "Rejected"): raise HTTPException(400, "Entry unavailable for submission")
+    if not _supervisor_assigned(employee.id, db):
+        raise HTTPException(409, "An Admin must assign a Supervisor before you can submit KPI actuals")
     obj.status="Submitted"; db.commit(); db.refresh(obj); return obj
 
 @router.patch("/entries/{entry_id}/review", response_model=EntryOut, response_model_exclude_unset=True)
-def review(entry_id:int, data:ReviewUpdate, db:Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+def review(entry_id:int, data:ReviewUpdate, db:Session=Depends(get_db), user:User=Depends(current_user)):
     obj=db.get(Entry,entry_id)
     if not obj: raise HTTPException(404,"Entry not found")
-    if obj.status != "Submitted": raise HTTPException(400, "Only entries submitted for review can be reviewed")
-    if data.status == "Rejected" and not (data.supervisor_comments or "").strip():
+    if not _can_review_entry(user, obj, db):
+        raise HTTPException(403, "This entry is not in your review queue")
+    is_supervisor_review = user.role == "Supervisor"
+    comments = data.supervisor_comments if is_supervisor_review else data.partner_comments
+    if data.status == "Rejected" and not (comments or "").strip():
         raise HTTPException(422, "Add reviewer feedback before rejecting an entry")
     if data.status == "Approved" and obj.actual is None:
         raise HTTPException(400, "An actual value is required before approval")
-    obj.status=data.status; obj.supervisor_comments=data.supervisor_comments; db.commit(); db.refresh(obj); return obj
+    if is_supervisor_review:
+        obj.supervisor_comments = comments
+        obj.status = "Supervisor Approved" if data.status == "Approved" else "Rejected"
+    else:
+        obj.partner_comments = comments
+        obj.status = "Approved" if data.status == "Approved" else "Rejected"
+    db.commit(); db.refresh(obj); return obj
 
 @router.post("/admin/generate-month")
 def generate(data:GenerateRequest, db:Session=Depends(get_db), _=Depends(require_roles("Admin","Partner"))): return {"created":generate_month(db,data.month)}
@@ -552,8 +662,8 @@ def generate(data:GenerateRequest, db:Session=Depends(get_db), _=Depends(require
 @router.post("/entries/import-excel")
 def import_entry_actuals(file: UploadFile=File(...), month: date=Form(...), employee_id: int|None=Form(default=None),
                          db: Session=Depends(get_db), user: User=Depends(current_user)):
-    if user.role == "Employee":
-        employee = db.query(Employee).filter(func.lower(Employee.email) == user.email.lower()).first()
+    if user.role in ("Employee", "Supervisor", "Partner"):
+        employee = _linked_employee(user, db)
         if not employee:
             raise HTTPException(404, "No employee profile is linked to this account")
     elif user.role == "Admin":
@@ -563,7 +673,7 @@ def import_entry_actuals(file: UploadFile=File(...), month: date=Form(...), empl
         if not employee:
             raise HTTPException(404, "Employee not found")
     else:
-        raise HTTPException(403, "Only employees and admins can import KPI actuals")
+        raise HTTPException(403, "This account cannot import KPI actuals")
 
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(415, "Upload an Excel .xlsx workbook")
