@@ -10,10 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 Base.metadata.create_all(bind=engine)
 ensure_review_schema()
 app=FastAPI(title=settings.app_name, version="0.1.0")
-#origins = [origin.strip().rstrip("/") for origin in settings.cors_origins.split(",") if origin.strip()]
-origins = [
-    "*"
-]
+origins = [origin.strip().rstrip("/") for origin in settings.cors_origins.split(",") if origin.strip()]
+
 app.include_router(router)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -23,7 +21,7 @@ templates=Jinja2Templates(directory="app/templates")
 def health(): return {"status":"ok"}
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
