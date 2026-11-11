@@ -12,7 +12,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func
+from sqlalchemy import func, IntegrityError
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
@@ -485,8 +485,17 @@ def submit_month_entries(month: date, data: BulkEntrySubmission, user: User=Depe
 
 @router.post("/employees", response_model=EmployeeOut)
 def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(require_roles("Admin","Partner"))):
-#def add_employee(data: EmployeeCreate, db: Session=Depends(get_db), _=Depends(current_user)):
-    obj=Employee(**data.model_dump()); db.add(obj); db.commit(); db.refresh(obj); return obj
+    obj=Employee(**data.model_dump())
+    db.add(obj)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Employee could not be saved (duplicate record). or conflicting Id(pkey)")
+    db.refresh(obj) 
+    # db.commit(); 
+    # db.refresh(obj); 
+    return obj
 
 @router.delete("/admin/employees/{employee_id}", status_code=204)
 def delete_employee(employee_id: int, db: Session=Depends(get_db), admin: User=Depends(require_roles("Admin"))):
