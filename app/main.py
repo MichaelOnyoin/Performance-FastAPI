@@ -26,8 +26,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# @app.get("/", response_class=HTMLResponse)
-# def home(request:Request): return templates.TemplateResponse("index.html", {"request":request,"app_name":settings.app_name})
 
 
 @app.get("/", response_class=HTMLResponse)

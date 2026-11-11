@@ -12,7 +12,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func, IntegrityError
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
