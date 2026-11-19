@@ -6,11 +6,13 @@ from sqlalchemy.orm import sessionmaker
 # Path to your local SQLite file
 SQLITE_URL = "sqlite:///./data/performance.db" 
 # Get your Neon URL from environment variables, or paste it here temporarily
-POSTGRES_URL = os.environ.get("DB_URL", "postgresql://neondb_owner:npg_KgAM5tzUa4Go@ep-nameless-pine-b5v7srq8-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+#POSTGRES_URL: str = os.environ.get("DB_URL")
+POSTGRES_URL='postgresql://neondb_owner:npg_KgAM5tzUa4Go@ep-nameless-pine-b5v7srq8-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 
+print("url",POSTGRES_URL)
 # Crucial for Neon/Postgres compatibility
-if POSTGRES_URL.startswith("postgres://"):
-    POSTGRES_URL = POSTGRES_URL.replace("postgres://", "postgresql://", 1)
+# if POSTGRES_URL.startswith("postgres://"):
+#     POSTGRES_URL = POSTGRES_URL.replace("postgres://", "postgresql://", 1)
 
 sqlite_engine = create_engine(SQLITE_URL)
 postgres_engine = create_engine(POSTGRES_URL)

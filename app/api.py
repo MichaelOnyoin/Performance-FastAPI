@@ -558,6 +558,15 @@ def entries(month: str|None=None, employee_id: int|None=None, db: Session=Depend
              "context_filename": _unpack_context(entry.context)[0] if entry.context else None}
             for entry, employee_name, kpi in rows]
 
+@router.delete("/entries/{entry_id}", status_code=204)
+def delete_entry(entry_id: int, db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    entry = db.get(Entry, entry_id)
+    if not entry:
+        raise HTTPException(404, "KPI entry not found")
+    db.delete(entry)
+    db.commit()
+    return Response(status_code=204)
+
 @router.post("/entries/{entry_id}/context")
 def upload_entry_context(entry_id: int, file: UploadFile=File(...), db: Session=Depends(get_db), user: User=Depends(current_user)):
     entry = db.get(Entry, entry_id)

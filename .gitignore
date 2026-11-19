@@ -7,3 +7,5 @@ __pycache__/
 .vscode/
 *.sqbpro
 docker
+# Claude Code session checkpoints
+.context/
