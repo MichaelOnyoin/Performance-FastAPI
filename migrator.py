@@ -10,8 +10,7 @@ from app.database import Base
 
 # 1. Setup Engines
 SQLITE_URL = "sqlite:///./data/performance.db"
-#POSTGRES_URL = os.environ.get("DB_URL")
-POSTGRES_URL='postgresql://neondb_owner:npg_KgAM5tzUa4Go@ep-nameless-pine-b5v7srq8-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+POSTGRES_URL = os.environ.get("DB_URL")
 
 if not POSTGRES_URL:
     print("Error: DB_URL environment variable is not set.")
