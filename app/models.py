@@ -54,6 +54,8 @@ class EmployeeKPI(Base):
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), primary_key=True)
     kpi_id: Mapped[int] = mapped_column(ForeignKey("kpis.id"), primary_key=True)
     target: Mapped[float] = mapped_column(Float)
+    kpi_weight: Mapped[float|None] = mapped_column(Float, nullable=True)
+    perspective_weight: Mapped[float|None] = mapped_column(Float, nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
 
 class Entry(Base):

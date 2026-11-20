@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from .database import get_db
 from .models import User, Employee, KPI, Entry, EmployeeKPI, EmployeeSupervisor, PasswordResetToken
-from .schemas import Token, EmployeeSignup, ForgotPasswordRequest, ResetPasswordRequest, EmployeeCreate, EmployeeOut, EntryUpdate, BulkEntrySubmission, ReviewUpdate, SupervisorAssignmentUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
+from .schemas import Token, EmployeeSignup, ForgotPasswordRequest, ResetPasswordRequest, EmployeeCreate, EmployeeOut, EntryUpdate, AdminEntryActualUpdate, BulkEntrySubmission, ReviewUpdate, SupervisorAssignmentUpdate, GenerateRequest, EntryOut, KPIUpdate, KPICreate, KPIOut, EmployeeKPIAssignmentUpdate, UserRoleUpdate, UserOut
 from .auth import verify_password, hash_password, create_token, current_user, require_roles
 from .services import calculate, generate_month
 from .config import settings
@@ -367,7 +367,8 @@ def _employee_kpi_assignments(db: Session, employee_id: int):
             .order_by(KPI.code).all())
     return [{"employee_id": assignment.employee_id, "kpi_id": kpi.id, "code": kpi.code,
              "name": kpi.name, "perspective": kpi.perspective,
-             "perspective_weight": kpi.perspective_weight, "kpi_weight": kpi.kpi_weight,
+             "perspective_weight": assignment.perspective_weight if assignment.perspective_weight is not None else kpi.perspective_weight,
+             "kpi_weight": assignment.kpi_weight if assignment.kpi_weight is not None else kpi.kpi_weight,
              "target": assignment.target} for assignment, kpi in rows]
 
 @router.get("/admin/employees/{employee_id}/kpis")
@@ -394,20 +395,24 @@ def set_employee_kpis(employee_id: int, data: EmployeeKPIAssignmentUpdate, db: S
         if item.target < 0:
             raise HTTPException(422, "Targets cannot be negative")
         assignment = db.get(EmployeeKPI, (employee_id, item.kpi_id))
+        changed = assignment is None or (assignment.target != item.target or assignment.kpi_weight != item.kpi_weight
+                                         or assignment.perspective_weight != item.perspective_weight)
         if assignment is None:
-            assignment = EmployeeKPI(employee_id=employee_id, kpi_id=item.kpi_id, target=item.target, is_active=True)
+            assignment = EmployeeKPI(employee_id=employee_id, kpi_id=item.kpi_id, target=item.target,
+                                     kpi_weight=item.kpi_weight, perspective_weight=item.perspective_weight, is_active=True)
             db.add(assignment)
         else:
-            changed = assignment.target != item.target
             assignment.target = item.target
+            assignment.kpi_weight = item.kpi_weight
+            assignment.perspective_weight = item.perspective_weight
             assignment.is_active = True
-            if changed:
-                for entry in db.query(Entry).filter(
-                    Entry.employee_id == employee_id, Entry.kpi_id == item.kpi_id,
-                    Entry.status.in_(("Draft", "Rejected"))
-                ).all():
-                    entry.target_snapshot = item.target
-                    calculate(entry, kpis[item.kpi_id])
+        if changed:
+            for entry in db.query(Entry).filter(
+                Entry.employee_id == employee_id, Entry.kpi_id == item.kpi_id,
+                Entry.status.in_(("Draft", "Rejected"))
+            ).all():
+                entry.target_snapshot = item.target
+                calculate(entry, kpis[item.kpi_id], assignment)
     db.commit()
     return _employee_kpi_assignments(db, employee_id)
 
@@ -429,7 +434,8 @@ def update_kpi(kpi_id: int, data: KPIUpdate, db: Session=Depends(get_db), _=Depe
     for field, value in changes.items():
         setattr(kpi, field, value)
     for entry in db.query(Entry).filter(Entry.kpi_id == kpi.id).all():
-        calculate(entry, kpi)
+        assignment = db.get(EmployeeKPI, (entry.employee_id, entry.kpi_id))
+        calculate(entry, kpi, assignment)
     db.commit()
     db.refresh(kpi)
     return kpi
@@ -478,7 +484,7 @@ def submit_month_entries(month: date, data: BulkEntrySubmission, user: User=Depe
         item = actuals[entry.id]
         entry.actual = item.actual
         entry.employee_comments = item.employee_comments
-        calculate(entry, kpi)
+        calculate(entry, kpi, db.get(EmployeeKPI, (entry.employee_id, entry.kpi_id)))
         entry.status = "Submitted"
     db.commit()
     return {"submitted": len(editable_rows), "month": month.isoformat()}
@@ -623,7 +629,7 @@ def update_entry(entry_id:int, data:EntryUpdate, db:Session=Depends(get_db), use
     employee = _linked_employee(user, db)
     if not employee or obj.employee_id != employee.id: raise HTTPException(404, "Entry not found")
     for k,v in data.model_dump(exclude_unset=True).items(): setattr(obj,k,v)
-    calculate(obj, db.get(KPI,obj.kpi_id)); db.commit(); db.refresh(obj); return obj
+    calculate(obj, db.get(KPI,obj.kpi_id), db.get(EmployeeKPI, (obj.employee_id, obj.kpi_id))); db.commit(); db.refresh(obj); return obj
 
 @router.patch("/entries/{entry_id}/review-edit", response_model=EntryOut, response_model_exclude_unset=True)
 def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(get_db), user: User=Depends(current_user)):
@@ -637,7 +643,21 @@ def reviewer_edit_entry(entry_id: int, data: EntryUpdate, db: Session=Depends(ge
         raise HTTPException(400, "No entry changes provided")
     for field, value in changes.items():
         setattr(entry, field, value)
-    calculate(entry, db.get(KPI, entry.kpi_id))
+    calculate(entry, db.get(KPI, entry.kpi_id), db.get(EmployeeKPI, (entry.employee_id, entry.kpi_id)))
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+@router.patch("/admin/entries/{entry_id}/actual", response_model=EntryOut, response_model_exclude_unset=True)
+def admin_update_entry_actual(entry_id: int, data: AdminEntryActualUpdate,
+                              db: Session=Depends(get_db), _=Depends(require_roles("Admin"))):
+    entry = db.get(Entry, entry_id)
+    if not entry:
+        raise HTTPException(404, "Entry not found")
+    if data.actual is not None and not math.isfinite(data.actual):
+        raise HTTPException(422, "Actual must be a finite number")
+    entry.actual = data.actual
+    calculate(entry, db.get(KPI, entry.kpi_id), db.get(EmployeeKPI, (entry.employee_id, entry.kpi_id)))
     db.commit()
     db.refresh(entry)
     return entry
@@ -751,7 +771,7 @@ def import_entry_actuals(file: UploadFile=File(...), month: date=Form(...), empl
             entry.target_snapshot = next(assignment.target for assignment, assigned_kpi in assignments if assigned_kpi.id == kpi.id)
         entry.actual = actual
         entry.employee_comments = row["comments"]
-        calculate(entry, kpi)
+        calculate(entry, kpi, next(assignment for assignment, assigned_kpi in assignments if assigned_kpi.id == kpi.id))
         imported += 1
 
     db.commit()

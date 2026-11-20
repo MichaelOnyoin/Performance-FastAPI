@@ -41,6 +41,14 @@ def ensure_review_schema():
         if "partner_comments" not in columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE entries ADD COLUMN partner_comments TEXT"))
+    inspector = inspect(engine)
+    if inspector.has_table("employee_kpis"):
+        columns = {column["name"] for column in inspector.get_columns("employee_kpis")}
+        with engine.begin() as connection:
+            if "kpi_weight" not in columns:
+                connection.execute(text("ALTER TABLE employee_kpis ADD COLUMN kpi_weight FLOAT"))
+            if "perspective_weight" not in columns:
+                connection.execute(text("ALTER TABLE employee_kpis ADD COLUMN perspective_weight FLOAT"))
 
 # def ensure_schema():
 #     """Apply the small additive migrations needed by existing development databases."""

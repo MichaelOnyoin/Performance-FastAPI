@@ -61,6 +61,9 @@ class EntryUpdate(BaseModel):
     actual: float|None = None
     employee_comments: str|None = None
 
+class AdminEntryActualUpdate(BaseModel):
+    actual: float|None
+
 class BulkEntryActual(BaseModel):
     entry_id: int
     actual: float
@@ -111,6 +114,8 @@ class KPIOut(BaseModel):
 class EmployeeKPIAssignment(BaseModel):
     kpi_id: int
     target: float
+    kpi_weight: float = Field(ge=0)
+    perspective_weight: float = Field(ge=0)
 
 class EmployeeKPIAssignmentUpdate(BaseModel):
     assignments: list[EmployeeKPIAssignment]

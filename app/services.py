@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from .models import Entry, KPI, EmployeeKPI, Employee
 
-def calculate(entry: Entry, kpi: KPI):
+def calculate(entry: Entry, kpi: KPI, assignment: EmployeeKPI|None=None):
     target = entry.target_snapshot if entry.target_snapshot is not None else kpi.target
     if entry.actual is None or target is None or target == 0:
         entry.performance_pct = entry.score = entry.final_score = None
@@ -16,7 +16,9 @@ def calculate(entry: Entry, kpi: KPI):
     5 if entry.performance_pct >= 90 else
     None
     )
-    entry.final_score = entry.score * kpi.perspective_weight * kpi.kpi_weight
+    perspective_weight = assignment.perspective_weight if assignment and assignment.perspective_weight is not None else kpi.perspective_weight
+    kpi_weight = assignment.kpi_weight if assignment and assignment.kpi_weight is not None else kpi.kpi_weight
+    entry.final_score = entry.score * perspective_weight * kpi_weight
 
 def generate_month(db: Session, month):
     created = 0
@@ -30,6 +32,6 @@ def generate_month(db: Session, month):
             created += 1
         elif exists.target_snapshot is None and exists.status in ("Draft", "Rejected"):
             exists.target_snapshot = assignment.target
-            calculate(exists, db.get(KPI, assignment.kpi_id))
+            calculate(exists, db.get(KPI, assignment.kpi_id), assignment)
     db.commit()
     return created
